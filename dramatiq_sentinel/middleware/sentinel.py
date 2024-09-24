@@ -36,7 +36,7 @@ class Sentinel(Middleware):
         self.broker: RedisBroker = None
         self.worker: Worker = None
 
-        self.logger = get_logger(__name__)
+        self.logger = get_logger(__name__.replace("_sentinel", ""))
 
         self._event_listeners: Dict[str, List[Callable]] = {}
 
