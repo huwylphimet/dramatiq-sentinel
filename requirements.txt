@@ -1,0 +1,2 @@
+dramatiq==1.17.0
+redis==5.0.8

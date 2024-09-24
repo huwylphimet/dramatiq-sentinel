@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dramatiq-sentinel"
+version = "1.0.0"
+description = "Dramatiq Middleware for Redis Sentinel Setup"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Philippe Huwyler", email = "philippe.huwyler@meteoblue.com" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "dramatiq>=1.17.0",
+    "redis==5.0.8"
+]
+
+[tool.black]
+line-length = 160
+force-exclude = '''
+/(
+\.git
+| \.venv
+| build
+| dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+skip_glob = [
+    "env", ".env", "venv", ".venv", 
+]
+
+[tool.flake8]
+ignore = ["E203","W503"]
+max-line-length = 160
+max-complexity = 11
+exclude = [
+    "env", ".env", "venv", ".venv"
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests"
+]
+
+[tool.coverage.run]
+disable_warnings = ["couldnt-parse"]
