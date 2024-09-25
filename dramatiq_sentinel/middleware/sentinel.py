@@ -402,7 +402,7 @@ class Sentinel(Middleware):
             ping = self.redis_ping()
             if ping:
                 self.logger.warning(f"Dramatiq broker updated to new Redis master {self.stringify_socket_tuple(discovered_master)}.")
-                self.resume_worker()
+            self.resume_worker()
             self._switching_master = False
             return ping
 
