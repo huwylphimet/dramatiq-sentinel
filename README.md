@@ -8,6 +8,8 @@ The middlware listens for (subscribe to) `+switch-master` events published by th
 When Redis master switch is detected, the service will first pause all dramatiq workers, then reset/update the dramatiq Redis broker connection and finally resume the dramatiq workers.  
 > Note: if pausing dramatiq workers timeouts, the service will forcefully exit to avoid any dead locks.
 
+![diagram](redis_cluster.drawio.svg)
+
 ## Installation
 
 `pip install git+https://github.com/huwylphimet/dramatiq-sentinel.git@v1.0.1`
