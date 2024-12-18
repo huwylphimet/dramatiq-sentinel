@@ -45,7 +45,7 @@ class Sentinel(Middleware):
         for s in sentinels:
             self.sentinels[s] = Redis(host=s[0], port=s[1], password=sentinel_password) if sentinel_password else Redis(host=s[0], port=s[1])
         self.socket_timeout = max(float(socket_timeout), 0.1)
-        self.sentinels_service_name = service_name
+        self.sentinel_service_name = service_name
         self.min_backoff = max(float(min_backoff), 1.0)
         self.max_backoff = min(float(max_backoff), 86400.0)
         self.backoff_factor = max(float(backoff_factor), 1.1)
@@ -196,10 +196,10 @@ class Sentinel(Middleware):
     def discover_redis_master(self) -> tuple | None:
         """Attempts to discover the Redis master through all Sentinels."""
         try:
-            self.last_discovered_redis_master = self.get_nat(self.sentinel.discover_master(self.sentinels_service_name))
+            self.last_discovered_redis_master = self.get_nat(self.sentinel.discover_master(self.sentinel_service_name))
             self.logger.debug(
                 f"Successfully discovered Redis master {self.stringify_socket_tuple(self.last_discovered_redis_master)}"
-                + f" from Sentinels (service name: '{self.sentinels_service_name}')"
+                + f" from Sentinels (service name: '{self.sentinel_service_name}')"
             )
             return self.last_discovered_redis_master
 
@@ -427,7 +427,7 @@ class Sentinel(Middleware):
         nb_quorums = 0
         for sentinel in self.sentinels.values():
             try:
-                resp = sentinel.execute_command(f"SENTINEL CKQUORUM {self.sentinels_service_name}")
+                resp = sentinel.execute_command(f"SENTINEL CKQUORUM {self.sentinel_service_name}")
                 available_sentinels += 1
                 if "OK" in resp.decode("utf-8"):
                     nb_quorums += 1
@@ -457,7 +457,7 @@ class Sentinel(Middleware):
         for sentinel in filtered_sentinels:
             try:
                 # Get the current master information
-                master_info = sentinel.sentinel_master(self.sentinels_service_name)
+                master_info = sentinel.sentinel_master(self.sentinel_service_name)
 
                 status = master_info.get("flags")
                 if status:
@@ -485,7 +485,7 @@ class Sentinel(Middleware):
         for sentinel in filtered_sentinels:
             try:
                 # Get the replicas information
-                replicas_info = sentinel.sentinel_slaves(self.sentinels_service_name)
+                replicas_info = sentinel.sentinel_slaves(self.sentinel_service_name)
 
                 for replica in replicas_info:
                     if replica.get("runid") in treated_replicas:
@@ -533,7 +533,7 @@ class Sentinel(Middleware):
 
         for sentinel in self.sentinels.values():
             try:
-                sentinels_info = sentinel.sentinel_sentinels(self.sentinels_service_name)
+                sentinels_info = sentinel.sentinel_sentinels(self.sentinel_service_name)
 
                 for sentinel_info in sentinels_info:
                     if sentinel_info.get("runid") in treated_sentinels:
