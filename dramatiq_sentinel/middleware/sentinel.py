@@ -66,9 +66,9 @@ class Sentinel(Middleware):
         self.log_sentinel_status()
 
         self._switching_master = False
-        self._start_sentinel_listener_threads()
-        if self.periodic_master_check:
-            self._start_periodic_master_check_thread()
+        self._sentinel_listener_threads = {}  # Keep track of Redis Sentinel listener threads (for each sentinel instance)
+        self._periodic_master_check_thread = None  # Keep track of the periodic Redis master check thread
+        self._middlewares_redis_clients = {}  # Keep track of middleware Redis clients
 
     def before_worker_boot(self, broker, worker):
         """Called before the worker process starts up."""
@@ -76,6 +76,21 @@ class Sentinel(Middleware):
             self.broker = broker
 
         self.worker = worker
+
+        # Fetch redis clients from all middlewares for resetting them on Redis master switch
+        for middleware in broker.middleware:
+            if hasattr(middleware, "backend") and hasattr(getattr(middleware, "backend"), "client"):
+                client = getattr(getattr(middleware, "backend"), "client")
+                if isinstance(client, Redis):
+                    self._middlewares_redis_clients[middleware] = client
+
+        count = len(self._middlewares_redis_clients)
+        middleware_names = ", ".join(key.__class__.__name__ for key in self._middlewares_redis_clients.keys()) if count > 0 else ""
+        self.logger.debug(f"Found {count} middleware{'s' if count > 1 else ''} with Redis backend" + (f": '{middleware_names}'" if middleware_names else ""))
+
+        self._start_sentinel_listener_threads()
+        if self.periodic_master_check:
+            self._start_periodic_master_check_thread()
 
     def after_declare_queue(self, broker, queue_name):
         """
@@ -90,18 +105,18 @@ class Sentinel(Middleware):
         if not self.last_discovered_redis_master:
             return
 
-        if self.get_redis_broker_host(broker) != self.last_discovered_redis_master:
+        if self.get_redis_broker_host(broker.client) != self.last_discovered_redis_master:
             self.logger.debug(f"Resetting Redis broker connection before enqueueing message {message} ...")
-            self.reset_borker_connection(broker, self.last_discovered_redis_master)
+            self.reset_broker_connection(broker.client, self.last_discovered_redis_master)
 
     def before_delay_message(self, broker, message):
         """Called before a message has been delayed in worker memory."""
         if not self.last_discovered_redis_master:
             return
 
-        if self.get_redis_broker_host(broker) != self.last_discovered_redis_master:
+        if self.get_redis_broker_host(broker.client) != self.last_discovered_redis_master:
             self.logger.debug(f"Resetting Redis broker connection before delaying message {message} ...")
-            self.reset_borker_connection(broker, self.last_discovered_redis_master)
+            self.reset_broker_connection(broker.client, self.last_discovered_redis_master)
 
     def before_ack(self, broker, message):
         """
@@ -111,9 +126,9 @@ class Sentinel(Middleware):
         if not self.last_discovered_redis_master:
             return
 
-        if self.get_redis_broker_host(broker) != self.last_discovered_redis_master:
+        if self.get_redis_broker_host(broker.client) != self.last_discovered_redis_master:
             self.logger.debug(f"Resetting Redis broker connection before acknowledging message {message} ...")
-            self.reset_borker_connection(broker, self.last_discovered_redis_master)
+            self.reset_broker_connection(broker.client, self.last_discovered_redis_master)
 
     def before_nack(self, broker, message):
         """
@@ -123,9 +138,9 @@ class Sentinel(Middleware):
         if not self.last_discovered_redis_master:
             return
 
-        if self.get_redis_broker_host(broker) != self.last_discovered_redis_master:
+        if self.get_redis_broker_host(broker.client) != self.last_discovered_redis_master:
             self.logger.debug(f"Resetting Redis broker connection before rejecting message {message} ...")
-            self.reset_borker_connection(broker, self.last_discovered_redis_master)
+            self.reset_broker_connection(broker.client, self.last_discovered_redis_master)
 
     def before_process_message(self, broker, message):
         """Called before a message is processed.
@@ -216,7 +231,17 @@ class Sentinel(Middleware):
         self.logger.info(f"Starting Redis Sentinel listeners ({len(self.sentinels)})...")
         self.broker_update_lock = Lock()
         for sentinel_host, sentinel_port in self.sentinels.keys():
-            Thread(
+            thread_name = f"SentinelListenerThread({self.stringify_socket_tuple((sentinel_host, sentinel_port))})"
+            existing_thread = self._sentinel_listener_threads.get((sentinel_host, sentinel_port))
+
+            # Check if an existing thread is alive
+            if existing_thread and existing_thread.is_alive():
+                self.logger.warning(f"Thread {thread_name} is already running, skipping!")
+                continue
+
+            # Start a new thread
+            self.logger.debug(f"Starting new Redis Sentinel listener thread '{thread_name}'...")
+            new_thread = Thread(
                 daemon=True,
                 target=self._listen_to_sentinel,
                 args=(
@@ -226,17 +251,27 @@ class Sentinel(Middleware):
                     self.max_backoff,
                     self.backoff_factor,
                 ),
-                name=f"SentinelListenerThread({self.stringify_socket_tuple((sentinel_host, sentinel_port))})",
-            ).start()
+                name=thread_name,
+            )
+            new_thread.start()
+            self._sentinel_listener_threads[(sentinel_host, sentinel_port)] = new_thread
 
     def _start_periodic_master_check_thread(self):
         self.logger.info(f"Starting periodic Redis master check (delay: {self.periodic_master_check} seconds)...")
-        Thread(
+
+        # Check if the thread is already running
+        if self._periodic_master_check_thread and self._periodic_master_check_thread.is_alive():
+            self.logger.warning("Periodic Redis master check thread is already running, skipping!")
+            return
+
+        # Start a new thread
+        self._periodic_master_check_thread = Thread(
             daemon=True,
             target=self._periodic_master_check,
             args=(self.periodic_master_check,),
             name="PeriodicMasterCheckThread",
-        ).start()
+        )
+        self._periodic_master_check_thread.start()
 
     def _listen_to_sentinel(
         self,
@@ -302,6 +337,7 @@ class Sentinel(Middleware):
 
             except Exception as e:
                 self.logger.critical(f"Unexpected error in Redis Sentinel event listener {self.stringify_socket_tuple((host, port))}: {e}", exc_info=True)
+                os._exit(69)  # Service Unavailable
                 break  # Exit loop on unexpected errors
 
     def _periodic_master_check(self, delay: float = 10.0, max_iterations: int = None):  # for unit tests
@@ -357,7 +393,7 @@ class Sentinel(Middleware):
             self.stringify_socket_tuple(sentinel),
         )
 
-        current_redis = self.get_redis_broker_host(self.broker)
+        current_redis = self.get_redis_broker_host(self.broker.client)
         if current_redis != new_master:
             self._check_and_update_sentinel_redis_master(True)
         else:
@@ -377,7 +413,7 @@ class Sentinel(Middleware):
                 return False
 
             # Update the broker if master has changed
-            current_redis = self.get_redis_broker_host(self.broker)
+            current_redis = self.get_redis_broker_host(self.broker.client)
             if current_redis == discovered_master:
                 msg = f"Current Redis host already set to {self.stringify_socket_tuple(current_redis)}, switching Redis master not needed."
                 if is_sentinel_event:
@@ -393,16 +429,22 @@ class Sentinel(Middleware):
             if not self.pause_worker(self.worker_pausing_timeout_before_exit, exit_on_timeout=True):
                 return False
 
-            old_host = self.get_redis_broker_host(self.broker)
+            old_host = self.get_redis_broker_host(self.broker.client)
             self.emit_event("before_redis_connection_reset", self.stringify_socket_tuple(old_host), self.stringify_socket_tuple(discovered_master))
-            self.logger.debug(f"Resetting Redis connection to {self.stringify_socket_tuple(discovered_master)}...")
-            self.reset_borker_connection(self.broker, discovered_master)
+            self.logger.warning(f"Resetting dramatiq worker Redis connection to {self.stringify_socket_tuple(discovered_master)}...")
+            self.reset_broker_connection(self.broker.client, discovered_master)
+            for middleware, client in self._middlewares_redis_clients.items():
+                self.logger.warning(
+                    f"Resetting Redis connection for middleware '{middleware.__class__.__name__}' to {self.stringify_socket_tuple(discovered_master)}..."
+                )
+                self.reset_broker_connection(client, discovered_master)
+
             self.emit_event("after_redis_connection_reset", self.stringify_socket_tuple(old_host), self.stringify_socket_tuple(discovered_master))
 
             ping = self.redis_ping()
             if ping:
                 self.logger.warning(f"Dramatiq broker updated to new Redis master {self.stringify_socket_tuple(discovered_master)}.")
-            self.resume_worker()
+                self.resume_worker()
             self._switching_master = False
             return ping
 
@@ -410,7 +452,7 @@ class Sentinel(Middleware):
         if not self.broker or not isinstance(self.broker.client, Redis):
             return False
 
-        host = self.get_redis_broker_host(self.broker)
+        host = self.get_redis_broker_host(self.broker.client)
         try:
             ping = self.broker.client.ping()
             if ping:
@@ -599,15 +641,15 @@ class Sentinel(Middleware):
             self.logger.debug("All worker threads have been resumed.")
 
     @staticmethod
-    def reset_borker_connection(broker: RedisBroker, host: tuple[str, int]) -> None:
+    def reset_broker_connection(client: Redis, host: tuple[str, int]) -> None:
         """Reset Redis connection to provided host."""
-        broker.client.connection_pool.connection_kwargs["host"] = host[0]
-        broker.client.connection_pool.connection_kwargs["port"] = int(host[1])
-        broker.client.connection_pool.reset()
+        client.connection_pool.connection_kwargs["host"] = host[0]
+        client.connection_pool.connection_kwargs["port"] = int(host[1])
+        client.connection_pool.reset()
 
     @staticmethod
-    def get_redis_broker_host(broker) -> tuple[str, int]:
-        return (broker.client.connection_pool.connection_kwargs["host"], int(broker.client.connection_pool.connection_kwargs["port"]))
+    def get_redis_broker_host(client: Redis) -> tuple[str, int]:
+        return (client.connection_pool.connection_kwargs["host"], int(client.connection_pool.connection_kwargs["port"]))
 
     def get_nat(self, host: tuple[str, int]) -> tuple[str, int]:
         return self.nat.get(host, host)
