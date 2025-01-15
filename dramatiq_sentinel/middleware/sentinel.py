@@ -70,15 +70,17 @@ class Sentinel(Middleware):
         self._periodic_master_check_thread = None  # Keep track of the periodic Redis master check thread
         self._middlewares_redis_clients = {}  # Keep track of middleware Redis clients
 
-    def before_worker_boot(self, broker, worker):
-        """Called before the worker process starts up."""
-        if not self.broker:
-            self.broker = broker
+        self._start_sentinel_listener_threads()
+        if self.periodic_master_check:
+            self._start_periodic_master_check_thread()
 
-        self.worker = worker
-
+    def fetch_middlewares_brokers(self):
         # Fetch redis clients from all middlewares for resetting them on Redis master switch
-        for middleware in broker.middleware:
+        # Alternatively we could require to pass them as input argument of this Sentinel middleware.
+        if not self.broker:
+            return
+
+        for middleware in self.broker.middleware:
             if hasattr(middleware, "backend") and hasattr(getattr(middleware, "backend"), "client"):
                 client = getattr(getattr(middleware, "backend"), "client")
                 if isinstance(client, Redis):
@@ -88,9 +90,12 @@ class Sentinel(Middleware):
         middleware_names = ", ".join(key.__class__.__name__ for key in self._middlewares_redis_clients.keys()) if count > 0 else ""
         self.logger.debug(f"Found {count} middleware{'s' if count > 1 else ''} with Redis backend" + (f": '{middleware_names}'" if middleware_names else ""))
 
-        self._start_sentinel_listener_threads()
-        if self.periodic_master_check:
-            self._start_periodic_master_check_thread()
+    def before_worker_boot(self, broker, worker):
+        """Called before the worker process starts up."""
+        if not self.broker:
+            self.broker = broker
+
+        self.worker = worker
 
     def after_declare_queue(self, broker, queue_name):
         """
@@ -99,6 +104,8 @@ class Sentinel(Middleware):
         """
         if not self.broker:
             self.broker = broker
+
+        self.fetch_middlewares_brokers()
 
     def before_enqueue(self, broker, message, delay):
         """Called before a message is enqueued."""
